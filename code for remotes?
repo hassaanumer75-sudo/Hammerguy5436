@@ -1,0 +1,221 @@
+-- NOTE: this is a script to create remotes and all.
+-- Made By Hammerguy5436
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local Players = game:GetService("Players")
+
+local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+if not remotesFolder then
+	remotesFolder = Instance.new("Folder")
+	remotesFolder.Name = "Remotes"
+	remotesFolder.Parent = ReplicatedStorage
+end
+
+local function ensureRemoteEvent(name)
+	local r = remotesFolder:FindFirstChild(name)
+	if r and r:IsA("RemoteEvent") then return r end
+	if r then r:Destroy() end
+	r = Instance.new("RemoteEvent")
+	r.Name = name
+	r.Parent = remotesFolder
+	return r
+end
+
+local function ensureRemoteFunction(name)
+	local r = remotesFolder:FindFirstChild(name)
+	if r and r:IsA("RemoteFunction") then return r end
+	if r then r:Destroy() end
+	r = Instance.new("RemoteFunction")
+	r.Name = name
+	r.Parent = remotesFolder
+	return r
+end
+
+-- events
+ensureRemoteEvent("StartMapVote")
+ensureRemoteEvent("VoteForMap")
+ensureRemoteEvent("RequestMovementState")
+ensureRemoteEvent("AdminCommand")
+
+-- functions
+local GetShopCatalog = ensureRemoteFunction("GetShopCatalog")
+local PurchaseItem = ensureRemoteFunction("PurchaseItem")
+local CheckAdminPass = ensureRemoteFunction("CheckAdminPass")
+
+--////////////////////////////////////////////////////////////
+-- SHOP CONFIG
+--////////////////////////////////////////////////////////////
+local SHOP_CATALOG = {
+	{Name = "Speed Coil",     Cost = 75,  ToolName = "Speed Coil"},
+	{Name = "Gravity Coil",   Cost = 75,  ToolName = "Gravity Coil"},
+	{Name = "Fusion Coil",    Cost = 250, ToolName = "Fusion Coil"},
+	{Name = "Rainbow Carpet", Cost = 150, ToolName = "Rainbow Carpet"},
+}
+
+local ShopToolsFolder = ServerStorage:FindFirstChild("ShopTools")
+
+--////////////////////////////////////////////////////////////
+-- Helpers (OwnedItems + tool granting)
+--////////////////////////////////////////////////////////////
+local function ensureLeaderstats(player)
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if not leaderstats then
+		leaderstats = Instance.new("Folder")
+		leaderstats.Name = "leaderstats"
+		leaderstats.Parent = player
+	end
+
+	local function ensureInt(name)
+		local v = leaderstats:FindFirstChild(name)
+		if not v then
+			v = Instance.new("IntValue")
+			v.Name = name
+			v.Value = 0
+			v.Parent = leaderstats
+		end
+		return v
+	end
+
+	ensureInt("Crystals")
+end
+
+local function ensureOwnedItemsFolder(player)
+	local f = player:FindFirstChild("OwnedItems")
+	if not f then
+		f = Instance.new("Folder")
+		f.Name = "OwnedItems"
+		f.Parent = player
+	end
+	return f
+end
+
+local function setOwnedItem(player, itemName, owned)
+	local folder = ensureOwnedItemsFolder(player)
+	local b = folder:FindFirstChild(itemName)
+	if not b then
+		b = Instance.new("BoolValue")
+		b.Name = itemName
+		b.Value = false
+		b.Parent = folder
+	end
+	b.Value = owned and true or false
+end
+
+local function ownsItem(player, itemName)
+	local folder = player:FindFirstChild("OwnedItems")
+	local b = folder and folder:FindFirstChild(itemName)
+	return (b and b:IsA("BoolValue") and b.Value) or false
+end
+
+local function containerHasTool(container, toolName)
+	if not container then return false end
+	for _, t in ipairs(container:GetChildren()) do
+		if t:IsA("Tool") and t.Name == toolName then
+			return true
+		end
+	end
+	return false
+end
+
+local function grantOwnedTools(player)
+	if not ShopToolsFolder then return end
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	local starterGear = player:FindFirstChild("StarterGear")
+
+	for _, item in ipairs(SHOP_CATALOG) do
+		if ownsItem(player, item.Name) and item.ToolName then
+			local template = ShopToolsFolder:FindFirstChild(item.ToolName)
+			if template and template:IsA("Tool") then
+				if backpack and not containerHasTool(backpack, template.Name) then
+					template:Clone().Parent = backpack
+				end
+				if starterGear and not containerHasTool(starterGear, template.Name) then
+					template:Clone().Parent = starterGear
+				end
+			end
+		end
+	end
+end
+
+-- Grant owned tools on spawn (useful if you store OwnedItems elsewhere too)
+Players.PlayerAdded:Connect(function(player)
+	ensureLeaderstats(player)
+	ensureOwnedItemsFolder(player)
+
+	player.CharacterAdded:Connect(function()
+		grantOwnedTools(player)
+	end)
+end)
+
+--////////////////////////////////////////////////////////////
+-- RemoteFunction handlers
+--////////////////////////////////////////////////////////////
+GetShopCatalog.OnServerInvoke = function(player)
+	-- Must return a table
+	local list = {}
+	for _, item in ipairs(SHOP_CATALOG) do
+		table.insert(list, {Name = item.Name, Cost = item.Cost})
+	end
+	return list
+end
+
+PurchaseItem.OnServerInvoke = function(player, itemName)
+	if typeof(itemName) ~= "string" then
+		return false, "Invalid item."
+	end
+
+	ensureLeaderstats(player)
+	ensureOwnedItemsFolder(player)
+
+	-- Find item
+	local catalogItem
+	for _, item in ipairs(SHOP_CATALOG) do
+		if item.Name == itemName then
+			catalogItem = item
+			break
+		end
+	end
+	if not catalogItem then
+		return false, "Item not found."
+	end
+
+	-- Validate tools folder + tool exists
+	if not ShopToolsFolder then
+		return false, "ServerStorage.ShopTools folder missing."
+	end
+	local toolTemplate = ShopToolsFolder:FindFirstChild(catalogItem.ToolName)
+	if not toolTemplate or not toolTemplate:IsA("Tool") then
+		return false, ("Missing tool: %s (in ServerStorage.ShopTools)"):format(catalogItem.ToolName)
+	end
+
+	-- Already owned
+	if ownsItem(player, catalogItem.Name) then
+		grantOwnedTools(player)
+		return true, "Already owned."
+	end
+
+	-- Currency
+	local crystals = player.leaderstats:FindFirstChild("Crystals")
+	if not crystals then
+		return false, "Crystals stat missing."
+	end
+
+	if crystals.Value < catalogItem.Cost then
+		return false, ("Not enough Crystals. Need %d."):format(catalogItem.Cost)
+	end
+
+	crystals.Value -= catalogItem.Cost
+	setOwnedItem(player, catalogItem.Name, true)
+	grantOwnedTools(player)
+
+	return true, "Purchased!"
+end
+
+-- Basic admin pass check (returns false unless you later wire MarketplaceService here)
+CheckAdminPass.OnServerInvoke = function(player)
+	-- If you want, you can implement MarketplaceService pass check here.
+	return false
+end
+
+print("✅ Remotes ensured + Shop handlers set.")
